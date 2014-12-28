@@ -8,20 +8,9 @@
 #include "http-parser/http_parser.h"
 #include "lwlog/lwlog.h"
 
+#define HTTP_PORT (8000)
 #define MAX_WRITE_HANDLES (1000)
 #define HTTP_BODY "helloworld!"
-
-#if 0
-#define UV_ERR(err, msg) lwlog_err("%s: %s", msg, uv_err_name(err))
-
-#define UV_CHECK(err, msg) \
-do {\
-    if (err != 0) {\
-        UV_ERR(err, msg); \
-        exit(1); \
-    }\
-} while(0)
-#endif
 
 #define UV_ERR(err, msg) lwlog_err("%s: [%s(%d): %s]\n", msg, uv_err_name((err)), (int)err, uv_strerror((err)))
 
@@ -252,7 +241,7 @@ int main(int argc, char *argv[]) {
     ret = uv_tcp_keepalive(&server, 1, 60);
     UV_CHECK(ret, "tcp_keepalive");
 
-    ret = uv_ip4_addr("0.0.0.0", 8000, &address);
+    ret = uv_ip4_addr("0.0.0.0", HTTP_PORT, &address);
     UV_CHECK(ret, "ip4_addr");
 
     ret = uv_tcp_bind(&server, (const struct sockaddr *) &address, 0);
@@ -261,7 +250,7 @@ int main(int argc, char *argv[]) {
     ret = uv_listen((uv_stream_t *) &server, MAX_WRITE_HANDLES, on_connect);
     UV_CHECK(ret, "uv_listen");
 
-    lwlog_info("listening on port 8000");
+    lwlog_info("Listening on port %d", HTTP_PORT);
 
     uv_run(uv_loop, UV_RUN_DEFAULT);
 
