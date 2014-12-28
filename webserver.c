@@ -11,6 +11,7 @@
 #define MAX_WRITE_HANDLES (1000)
 #define HTTP_BODY "helloworld!"
 
+#if 0
 #define UV_ERR(err, msg) lwlog_err("%s: %s", msg, uv_err_name(err))
 
 #define UV_CHECK(err, msg) \
@@ -19,6 +20,17 @@ do {\
         UV_ERR(err, msg); \
         exit(1); \
     }\
+} while(0)
+#endif
+
+#define UV_ERR(err, msg) lwlog_err("%s: [%s(%d): %s]\n", msg, uv_err_name((err)), (int)err, uv_strerror((err)))
+
+#define UV_CHECK(err, msg) \
+do { \
+  if (err != 0) { \
+    UV_ERR(err, msg); \
+    exit(1); \
+  } \
 } while(0)
 
 static int request_num = 1;
