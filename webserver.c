@@ -22,7 +22,7 @@ do { \
   } \
 } while(0)
 
-static int request_num = 1;
+static int request_num = 0;
 static uv_loop_t *uv_loop;
 static uv_tcp_t server;
 static http_parser_settings parser_settings;
@@ -52,7 +52,8 @@ void alloc_cb(uv_handle_t * handle/*handle*/, size_t suggested_size, uv_buf_t *b
 
 void on_read(uv_stream_t *tcp, ssize_t nread, const uv_buf_t *buf) {
     ssize_t parsed = 0;
-    lwlog_info("on read: %ld", nread);
+    lwlog_info("on read, nread: %ld", nread);
+
     client_t *client = (client_t *) tcp->data;
     if (nread >= 0) {
         parsed = (ssize_t) http_parser_execute(
@@ -63,7 +64,7 @@ void on_read(uv_stream_t *tcp, ssize_t nread, const uv_buf_t *buf) {
         }
     } else {
         if (nread != UV_EOF) {
-            UV_ERR(nread, "read");
+            UV_ERR(nread, "Read error");
         }
         uv_close((uv_handle_t *) &client->handle, on_close);
     }
@@ -193,8 +194,8 @@ void on_connect(uv_stream_t *server_handle, int status) {
     assert((uv_tcp_t *) server_handle == &server);
 
     client = (client_t *) malloc(sizeof(client_t));
-    client->request_num = request_num;
     ++request_num;
+    client->request_num = request_num;
 
     lwlog_info("[ %5d ] new connection", request_num);
 
@@ -205,9 +206,12 @@ void on_connect(uv_stream_t *server_handle, int status) {
     client->handle.data = client;
 
     ret = uv_accept(server_handle, (uv_stream_t *) &client->handle);
-    UV_CHECK(ret, "accept");
-
-    uv_read_start((uv_stream_t *) &client->handle, alloc_cb, on_read);
+    if (ret == 0) {
+        uv_read_start((uv_stream_t *) &client->handle, alloc_cb, on_read);
+    } else {
+        uv_close((uv_handle_t *) &client->handle, on_close);
+        //UV_CHECK(ret, "accept");
+    }
 
     return;
 }
