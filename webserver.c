@@ -13,12 +13,24 @@
 #define HTTP_BODY "hello world!\r\n"
 #define INDEX_HTML "index.html"
 
+#define GETCONF \
+    "HTTP/1.1 200 OK\r\n" \
+    "Content-Type: text/plain\r\n" \
+    "Content-Length: 82\r\n" \
+    "\r\n"\
+    "rtmp://pili-in.qiniu.com/livestream/9dom822q|b68074ef-2852-45d7-b709-93345bc4ca2a\r\n"
+
 #define RESPONSE_HEADER \
     "HTTP/1.1 200 OK\r\n" \
     "Content-Type: text/plain\r\n" \
-    "Content-Length: 4157\r\n" \
+    "Content-Length: 4181\r\n" \
     "\r\n"
 
+static char http_header[] = "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/html\r\n"
+        "Content-Length: %d\r\n"
+        "\r\n"
+        "%s";
 
 #define MAX_HTTP_HEADERS (20)
 
@@ -223,23 +235,52 @@ int on_message_complete(http_parser *parser) {
     printf("body: %s\n", http_request->body);
     printf("\r\n");
 
-    char *file_contents;
-    long input_file_size;
-    FILE *input_file = fopen(INDEX_HTML, "rb");
-    fseek(input_file, 0, SEEK_END);
-    input_file_size = ftell(input_file);
-    rewind(input_file);
-    file_contents = malloc(input_file_size * (sizeof(char)));
-    fread(file_contents, sizeof(char), input_file_size, input_file);
-    fclose(input_file);
+    if (0 == strcmp(http_request->url, "/")) {
+        lwlog_info("root");
+        char *file_contents;
+        long input_file_size;
+        FILE *input_file = fopen(INDEX_HTML, "rb");
+        fseek(input_file, 0, SEEK_END);
+        input_file_size = ftell(input_file);
+        rewind(input_file);
+        file_contents = malloc(input_file_size * (sizeof(char)));
+        fread(file_contents, sizeof(char), input_file_size, input_file);
+        fclose(input_file);
 
-    lwlog_info("input_file_size: %ld", input_file_size);
-    /* set the http response to the buffer */
-    resp_buf.base = file_contents;
-    resp_buf.len = input_file_size;
+        lwlog_info("input_file_size: %ld", input_file_size);
 
-    /* lets send our short http hello world response and close the socket */
-    uv_write(&http_request->req, &http_request->stream, &resp_buf, 1, tcp_write_cb);
+        resp_buf.base = malloc((input_file_size + sizeof(http_header) + 10) * sizeof(char));
+
+        sprintf(resp_buf.base, http_header, input_file_size, file_contents);
+        /* set the http response to the buffer */
+        //resp_buf.base = file_contents;
+        resp_buf.len = input_file_size + sizeof(http_header) + 10;
+
+        free(file_contents);
+
+        /* lets send our short http hello world response and close the socket */
+        uv_write(&http_request->req, &http_request->stream, &resp_buf, 1, tcp_write_cb);
+    }
+
+    if (0 == strcmp(http_request->url, "/getconf")) {
+        lwlog_info("getconf");
+        resp_buf.base = GETCONF;
+        resp_buf.len = sizeof(GETCONF);
+        /* lets send our short http hello world response and close the socket */
+        uv_write(&http_request->req, &http_request->stream, &resp_buf, 1, tcp_write_cb);
+    }
+
+    if (0 == strcmp(http_request->url, "/setconf")) {
+        lwlog_info("setconf");
+    }
+
+    if (0 == strcmp(http_request->url, "/start")) {
+        lwlog_info("start");
+    }
+
+    if (0 == strcmp(http_request->url, "/stop")) {
+        lwlog_info("stop");
+    }
 
     return 0;
 }
