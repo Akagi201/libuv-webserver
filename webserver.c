@@ -11,6 +11,16 @@
 #define HTTP_PORT (8000)
 #define MAX_WRITE_HANDLES (1000)
 #define HTTP_BODY "helloworld!"
+#define INDEX_HTML "index.html"
+
+#define RESPONSE \
+    "HTTP/1.1 200 OK\r\n" \
+    "Content-Type: text/plain\r\n" \
+    "Content-Length: 12\r\n" \
+    "\r\n" \
+    "Hello World\n" \
+
+#define MAX_HTTP_HEADERS (20)
 
 #define UV_ERR(err, msg) lwlog_err("%s: [%s(%d): %s]\n", msg, uv_err_name((err)), (int)err, uv_strerror((err)))
 
@@ -22,24 +32,52 @@ do { \
   } \
 } while(0)
 
+/**
+* Represents a single http header.
+*/
+typedef struct {
+    const char* field;
+    const char* value;
+    size_t field_length;
+    size_t value_length;
+} http_header_t;
+
+/**
+* Represents a http request with internal dependencies.
+*
+* - write request for sending the response
+* - reference to tcp socket as write stream
+* - instance of http_parser parser
+* - string of the http url
+* - string of the http method
+* - amount of total header lines
+* - http header array
+* - body content
+*/
+typedef struct {
+    uv_write_t req;
+    uv_stream_t stream;
+    http_parser parser;
+    char* url;
+    char* method;
+    int header_lines;
+    http_header_t headers[MAX_HTTP_HEADERS];
+    const char* body;
+} http_request_t;
+
 static int request_num = 0;
 static uv_loop_t *uv_loop;
 static uv_tcp_t server;
 static http_parser_settings parser_settings;
-
-typedef struct {
-    uv_tcp_t handle;
-    http_parser parser;
-    uv_write_t write_req;
-    int request_num;
-} client_t;
+static int parsed_url = 0;
 
 void on_close(uv_handle_t *handle) {
-    client_t *client = (client_t *) handle->data;
 
-    lwlog_info("[ %5d ] connection closed", client->request_num);
+    http_request_t *http_request  = (http_request_t *) handle->data;
 
-    free(client);
+    lwlog_info("connection closed");
+
+    free(http_request);
 
     return;
 }
@@ -50,166 +88,177 @@ void alloc_cb(uv_handle_t * handle/*handle*/, size_t suggested_size, uv_buf_t *b
     return;
 }
 
-void on_read(uv_stream_t *tcp, ssize_t nread, const uv_buf_t *buf) {
+void on_read(uv_stream_t *stream, ssize_t nread, const uv_buf_t *buf) {
     ssize_t parsed = 0;
     lwlog_info("on read, nread: %ld", nread);
 
-    client_t *client = (client_t *) tcp->data;
+    /* get back our http request*/
+    http_request_t* http_request = stream->data;
+
     if (nread >= 0) {
+        /*  call our http parser on the received tcp payload */
         parsed = (ssize_t) http_parser_execute(
-                &client->parser, &parser_settings, buf->base, nread);
+                &http_request->parser, &parser_settings, buf->base, nread);
         if (parsed < nread) {
             lwlog_err("parse error");
-            uv_close((uv_handle_t *) &client->handle, on_close);
+            uv_close((uv_handle_t *) &http_request->stream, on_close);
         }
     } else {
         if (nread != UV_EOF) {
             UV_ERR(nread, "Read error");
         }
-        uv_close((uv_handle_t *) &client->handle, on_close);
+        uv_close((uv_handle_t *) &http_request->stream, on_close);
     }
     free(buf->base);
 
     return;
 }
 
-typedef struct {
-    uv_work_t request;
-    client_t *client;
-    bool error;
-    char *result;
-} render_baton_t;
-
-void after_write(uv_write_t *req, int status) {
-    UV_CHECK(status, "write");
-    if (!uv_is_closing((uv_handle_t *) req->handle)) {
-        // free render_baton_t
-        render_baton_t *closure = (render_baton_t *)(req->data);
-        free(closure);
-        uv_close((uv_handle_t *) req->handle, on_close);
-    }
-
-    return;
-}
-
-void render(uv_work_t *req) {
-    render_baton_t *closure = (render_baton_t *)(req->data);
-    client_t *client = (client_t *) closure->client;
-
-    lwlog_info("[ %5d ] render", client->request_num);
-    //closure->result = "hello world";
-    closure->result = malloc(sizeof(HTTP_BODY));
-    snprintf(closure->result, sizeof(HTTP_BODY), HTTP_BODY);
-
-    return;
-}
-
-void after_render(uv_work_t *req) {
-    render_baton_t *closure = (render_baton_t *)(req->data);
-    client_t *client = (client_t *) closure->client;
-    char rep[256] = {0};
-
-    lwlog_info("[ %5d ] after render", client->request_num);
-
-    snprintf(rep, sizeof(rep), "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: keep-alive\r\nContent-Length: %d\r\n\r\n%s", strlen(closure->result), closure->result);
-
-
-    uv_buf_t resbuf;
-    resbuf.base = (char *) rep;
-    resbuf.len = strlen(rep);
-
-    client->write_req.data = closure;
-
-    // https://github.com/joyent/libuv/issues/344
-    int r = uv_write(&client->write_req,
-            (uv_stream_t *) &client->handle,
-            &resbuf,
-            1,
-            after_write);
-    UV_CHECK(r, "write buff");
-
-    return;
-}
-
+/**
+* Initializes default values, counters.
+*/
 int on_message_begin(http_parser * parser/*parser*/) {
     lwlog_info("\n***MESSAGE BEGIN***\n");
+    http_request_t* http_request = parser->data;
+    http_request->header_lines = 0;
 
     return 0;
 }
 
+/**
+* Extract the method name.
+*/
 int on_headers_complete(http_parser * parser/*parser*/) {
     lwlog_info("\n***HEADERS COMPLETE***\n");
 
+    http_request_t* http_request = parser->data;
+
+    const char* method = http_method_str(parser->method);
+
+    http_request->method = malloc(sizeof(method));
+    strncpy(http_request->method, method, strlen(method));
+
     return 0;
 }
 
+/**
+* Copies url string to http_request->url.
+*/
 int on_url(http_parser * parser/*parser*/, const char *at, size_t length) {
     lwlog_info("Url: %.*s", (int) length, at);
 
+    http_request_t* http_request = parser->data;
+
+    http_request->url = malloc(length + 1);
+
+    strncpy((char*) http_request->url, at, length);
+
     return 0;
 }
 
+/**
+* Copy the header field name to the current header item.
+*/
 int on_header_field(http_parser * parser/*parser*/, const char *at, size_t length) {
     lwlog_info("Header field: %.*s", (int) length, at);
+    http_request_t* http_request = parser->data;
+    http_header_t* header = &http_request->headers[http_request->header_lines];
+    header->field = malloc(length+1);
+    header->field_length = length;
+    strncpy((char*) header->field, at, length);
 
     return 0;
 }
 
+/**
+* Now copy its assigned value.
+*/
 int on_header_value(http_parser * parser/*parser*/, const char *at, size_t length) {
     lwlog_info("Header value: %.*s", (int) length, at);
+
+    http_request_t* http_request = parser->data;
+
+    http_header_t* header = &http_request->headers[http_request->header_lines];
+
+    header->value_length = length;
+    header->value = malloc(length+1);
+
+    strncpy((char*) header->value, at, length);
+
+    ++http_request->header_lines;
 
     return 0;
 }
 
 int on_body(http_parser * parser/*parser*/, const char *at, size_t length) {
     lwlog_info("Body: %.*s", (int) length, at);
+    http_request_t* http_request = parser->data;
+
+    http_request->body = malloc(length+1);
+    http_request->body = at;
 
     return 0;
 }
 
+/**
+* Closes current tcp socket after write.
+*/
+void tcp_write_cb(uv_write_t* req, int status) {
+    uv_close((uv_handle_t*) req->handle, NULL);
+}
+
 int on_message_complete(http_parser *parser) {
+    uv_buf_t resp_buf;
     lwlog_info("\n***MESSAGE COMPLETE***\n");
 
-    client_t *client = (client_t *) parser->data;
+    http_request_t* http_request = parser->data;
+    /* now print the ordered http http_request to console */
+    printf("url: %s\n", http_request->url);
+    printf("method: %s\n", http_request->method);
+    for (int i = 0; i < 5; i++) {
+        http_header_t* header = &http_request->headers[i];
+        if (header->field)
+            printf("Header: %s: %s\n", header->field, header->value);
+    }
+    printf("body: %s\n", http_request->body);
+    printf("\r\n");
 
-    lwlog_info("[ %5d ] on_message_complete", client->request_num);
-    render_baton_t *closure = malloc(sizeof(render_baton_t));
-    closure->request.data = closure;
-    closure->client = client;
-    closure->error = false;
-    int status = uv_queue_work(uv_default_loop(),
-            &closure->request,
-            render,
-            (uv_after_work_cb) after_render);
-    UV_CHECK(status, "uv_queue_work");
-    assert(status == 0);
+    /* set the http response to the buffer */
+    resp_buf.base = RESPONSE;
+    resp_buf.len = sizeof(RESPONSE);
+
+    /* lets send our short http hello world response and close the socket */
+    uv_write(&http_request->req, &http_request->stream, &resp_buf, 1,
+            tcp_write_cb);
 
     return 0;
 }
 
 void on_connect(uv_stream_t *server_handle, int status) {
     int ret = 0;
-    client_t *client = NULL;
     UV_CHECK(status, "connect");
     assert((uv_tcp_t *) server_handle == &server);
 
-    client = (client_t *) malloc(sizeof(client_t));
-    ++request_num;
-    client->request_num = request_num;
+    /* initialize a new http http_request struct */
+    http_request_t* http_request = malloc(sizeof(http_request_t));
 
-    lwlog_info("[ %5d ] new connection", request_num);
+    /* create an extra tcp handle for the http_request */
+    uv_tcp_init(uv_loop, (uv_tcp_t*) &http_request->stream);
 
-    uv_tcp_init(uv_loop, &client->handle);
-    http_parser_init(&client->parser, HTTP_REQUEST);
+    /* set references so we can use our http_request in http_parser and libuv */
+    http_request->stream.data = http_request;
+    http_request->parser.data = http_request;
 
-    client->parser.data = client;
-    client->handle.data = client;
-
-    ret = uv_accept(server_handle, (uv_stream_t *) &client->handle);
+    /* accept the created http_request */
+    ret = uv_accept(server_handle, &http_request->stream);
     if (ret == 0) {
-        uv_read_start((uv_stream_t *) &client->handle, alloc_cb, on_read);
+        /* initialize our http parser */
+        http_parser_init(&http_request->parser, HTTP_REQUEST);
+        /* start reading from the tcp http_request socket */
+        uv_read_start(&http_request->stream, alloc_cb, on_read);
     } else {
-        uv_close((uv_handle_t *) &client->handle, on_close);
+        /* we seem to have an error and quit */
+        uv_close((uv_handle_t*) &http_request->stream, on_close);
         //UV_CHECK(ret, "accept");
     }
 
@@ -226,7 +275,7 @@ int main(int argc, char *argv[]) {
 
     cores = sysconf(_SC_NPROCESSORS_ONLN);
     lwlog_info("Number of available CPU cores %ld", cores);
-    snprintf(cores_string, sizeof(cores_string), "%d", cores);
+    snprintf(cores_string, sizeof(cores_string), "%ld", cores);
     setenv("UV_THREADPOOL_SIZE", cores_string, 1);
 
     parser_settings.on_message_begin = on_message_begin;
