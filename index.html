@@ -67,6 +67,9 @@
           var split = data.split('|')
           $('#push-url').val(split[0]);
           $('#stream-key').val(split[1]);
+
+          var slices = $('#push-url').val().split('/')
+          $('#qrcode').empty().qrcode('{"sid":"'+slices[slices.length - 1]+'"}');
         },
         error: function(){
           $('#notice').addClass('alert alert-danger').text('Get push_url and stream_key failed!');
@@ -85,7 +88,7 @@
           success: function(data){
             $('#notice').addClass('alert alert-success').text('Configuration success!');
             var slices = $('#push-url').val().split('/')
-            $('#qrcode').empty().qrcode('{sid:'+slices[slices.length - 1]+'}');
+            $('#qrcode').empty().qrcode('{"sid":"'+slices[slices.length - 1]+'"}');
           },
           error: function(){
             $('#notice').addClass('alert alert-danger').text('Configuration failed!');

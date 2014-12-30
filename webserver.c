@@ -2,7 +2,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
-#include <stdbool.h>
 #include <unistd.h> // _SC_NPROCESSORS_ONLN on OS X
 #include "uv.h"
 #include "http-parser/http_parser.h"
@@ -10,27 +9,27 @@
 
 #define HTTP_PORT (8000)
 #define MAX_WRITE_HANDLES (1000)
-#define HTTP_BODY "hello world!\r\n"
 #define INDEX_HTML "index.html"
 
 #define GETCONF \
     "HTTP/1.1 200 OK\r\n" \
     "Content-Type: text/plain\r\n" \
-    "Content-Length: 82\r\n" \
     "\r\n"\
     "rtmp://pili-in.qiniu.com/livestream/9dom822q|b68074ef-2852-45d7-b709-93345bc4ca2a\r\n"
 
 #define RESPONSE_HEADER \
     "HTTP/1.1 200 OK\r\n" \
     "Content-Type: text/plain\r\n" \
-    "Content-Length: 4181\r\n" \
     "\r\n"
 
 static char http_header[] = "HTTP/1.1 200 OK\r\n"
         "Content-Type: text/html\r\n"
-        "Content-Length: %d\r\n"
         "\r\n"
         "%s";
+
+#define HTTP_HEADER "HTTP/1.1 200 OK\r\n" \
+    "Content-Type: text/html\r\n" \
+    "\r\n"
 
 #define MAX_HTTP_HEADERS (20)
 
@@ -48,8 +47,8 @@ do { \
 * Represents a single http header.
 */
 typedef struct {
-    const char* field;
-    const char* value;
+    const char *field;
+    const char *value;
     size_t field_length;
     size_t value_length;
 } http_header_t;
@@ -70,11 +69,12 @@ typedef struct {
     uv_write_t req;
     uv_stream_t stream;
     http_parser parser;
-    char* url;
-    char* method;
+    char *url;
+    char *method;
     int header_lines;
     http_header_t headers[MAX_HTTP_HEADERS];
-    const char* body;
+    const char *body;
+    uv_buf_t resp_buf[2];
 } http_request_t;
 
 static int request_num = 0;
@@ -85,7 +85,7 @@ static int parsed_url = 0;
 
 void on_close(uv_handle_t *handle) {
 
-    http_request_t *http_request  = (http_request_t *) handle->data;
+    http_request_t *http_request = (http_request_t *) handle->data;
 
     lwlog_info("connection closed");
 
@@ -94,7 +94,7 @@ void on_close(uv_handle_t *handle) {
     return;
 }
 
-void alloc_cb(uv_handle_t * handle/*handle*/, size_t suggested_size, uv_buf_t *buf) {
+void alloc_cb(uv_handle_t *handle/*handle*/, size_t suggested_size, uv_buf_t *buf) {
     *buf = uv_buf_init((char *) malloc(suggested_size), suggested_size);
 
     return;
@@ -105,7 +105,7 @@ void on_read(uv_stream_t *stream, ssize_t nread, const uv_buf_t *buf) {
     lwlog_info("on read, nread: %ld", nread);
 
     /* get back our http request*/
-    http_request_t* http_request = stream->data;
+    http_request_t *http_request = stream->data;
 
     if (nread >= 0) {
         /*  call our http parser on the received tcp payload */
@@ -129,9 +129,9 @@ void on_read(uv_stream_t *stream, ssize_t nread, const uv_buf_t *buf) {
 /**
 * Initializes default values, counters.
 */
-int on_message_begin(http_parser * parser/*parser*/) {
-    lwlog_info("\n***MESSAGE BEGIN***\n");
-    http_request_t* http_request = parser->data;
+int on_message_begin(http_parser *parser/*parser*/) {
+    lwlog_info("***MESSAGE BEGIN***");
+    http_request_t *http_request = parser->data;
     http_request->header_lines = 0;
 
     return 0;
@@ -140,12 +140,12 @@ int on_message_begin(http_parser * parser/*parser*/) {
 /**
 * Extract the method name.
 */
-int on_headers_complete(http_parser * parser/*parser*/) {
-    lwlog_info("\n***HEADERS COMPLETE***\n");
+int on_headers_complete(http_parser *parser/*parser*/) {
+    lwlog_info("***HEADERS COMPLETE***");
 
-    http_request_t* http_request = parser->data;
+    http_request_t *http_request = parser->data;
 
-    const char* method = http_method_str(parser->method);
+    const char *method = http_method_str(parser->method);
 
     http_request->method = malloc(sizeof(method));
     strncpy(http_request->method, method, strlen(method));
@@ -156,14 +156,14 @@ int on_headers_complete(http_parser * parser/*parser*/) {
 /**
 * Copies url string to http_request->url.
 */
-int on_url(http_parser * parser/*parser*/, const char *at, size_t length) {
+int on_url(http_parser *parser/*parser*/, const char *at, size_t length) {
     lwlog_info("Url: %.*s", (int) length, at);
 
-    http_request_t* http_request = parser->data;
+    http_request_t *http_request = parser->data;
 
     http_request->url = malloc(length + 1);
 
-    strncpy((char*) http_request->url, at, length);
+    strncpy((char *) http_request->url, at, length);
 
     return 0;
 }
@@ -171,13 +171,17 @@ int on_url(http_parser * parser/*parser*/, const char *at, size_t length) {
 /**
 * Copy the header field name to the current header item.
 */
-int on_header_field(http_parser * parser/*parser*/, const char *at, size_t length) {
+int on_header_field(http_parser *parser/*parser*/, const char *at, size_t length) {
     lwlog_info("Header field: %.*s", (int) length, at);
-    http_request_t* http_request = parser->data;
-    http_header_t* header = &http_request->headers[http_request->header_lines];
-    header->field = malloc(length+1);
+
+    http_request_t *http_request = parser->data;
+
+    http_header_t *header = &http_request->headers[http_request->header_lines];
+
+    header->field = malloc(length + 1);
     header->field_length = length;
-    strncpy((char*) header->field, at, length);
+
+    strncpy((char *) header->field, at, length);
 
     return 0;
 }
@@ -185,102 +189,215 @@ int on_header_field(http_parser * parser/*parser*/, const char *at, size_t lengt
 /**
 * Now copy its assigned value.
 */
-int on_header_value(http_parser * parser/*parser*/, const char *at, size_t length) {
+int on_header_value(http_parser *parser/*parser*/, const char *at, size_t length) {
     lwlog_info("Header value: %.*s", (int) length, at);
 
-    http_request_t* http_request = parser->data;
+    http_request_t *http_request = parser->data;
 
-    http_header_t* header = &http_request->headers[http_request->header_lines];
+    http_header_t *header = &http_request->headers[http_request->header_lines];
 
+    header->value = malloc(length + 1);
     header->value_length = length;
-    header->value = malloc(length+1);
 
-    strncpy((char*) header->value, at, length);
+    strncpy((char *) header->value, at, length);
 
     ++http_request->header_lines;
 
     return 0;
 }
 
-int on_body(http_parser * parser/*parser*/, const char *at, size_t length) {
+int on_body(http_parser *parser/*parser*/, const char *at, size_t length) {
     lwlog_info("Body: %.*s", (int) length, at);
-    http_request_t* http_request = parser->data;
+    http_request_t *http_request = parser->data;
 
-    http_request->body = malloc(length+1);
+    http_request->body = malloc(length + 1);
     http_request->body = at;
 
     return 0;
 }
 
+#if 0
+void tcp_write_cb(uv_write_t *req, int status) {
+    char *buf = NULL;
+    UV_CHECK(status, "tcp_write");
+    buf = (char *)req->data;
+    if (!uv_is_closing((uv_handle_t*)req->handle)) {
+        uv_close((uv_handle_t *) req->handle, on_close);
+    }
+
+    return;
+}
+#endif
+
 /**
 * Closes current tcp socket after write.
 */
-void tcp_write_cb(uv_write_t* req, int status) {
-    uv_close((uv_handle_t*) req->handle, NULL);
+void on_nobuf_write(uv_write_t *req, int status){
+    int i = 0;
+    http_header_t *header = NULL;
+    http_request_t *http_request = req->data;
+    UV_CHECK(status, "on_nobuf_write");
+
+    free(http_request->url);
+    free(http_request->method);
+    for (i = 0; i < http_request->header_lines; ++i) {
+        header = &http_request->headers[i];
+        free(header->field);
+        free(header->value);
+    }
+
+    if (!uv_is_closing((uv_handle_t*)req->handle)) {
+        uv_close((uv_handle_t *) req->handle, on_close);
+    }
+
+    return;
+}
+
+/**
+* Closes current tcp socket after write.
+*/
+void on_buf_write(uv_write_t *req, int status) {
+    int i = 0;
+    char *buf = NULL;
+    http_header_t *header = NULL;
+    http_request_t *http_request = req->data;
+
+    UV_CHECK(status, "on_buf_write");
+    buf = (char *)http_request->resp_buf[1].base;
+
+    if (NULL != buf) {
+        free(buf);
+        buf = NULL;
+    }
+
+    free(http_request->url);
+    free(http_request->method);
+    if (http_request->body != NULL) {
+        free(http_request->body);
+    }
+    for (i = 0; i < http_request->header_lines; ++i) {
+        header = &http_request->headers[i];
+        free(header->field);
+        free(header->value);
+    }
+
+    if (!uv_is_closing((uv_handle_t*)req->handle)) {
+        uv_close((uv_handle_t *) req->handle, on_close);
+    }
+
+    return;
 }
 
 int on_message_complete(http_parser *parser) {
-    uv_buf_t resp_buf;
-    lwlog_info("\n***MESSAGE COMPLETE***\n");
+    int i = 0;
+    http_header_t *header = NULL;
 
-    http_request_t* http_request = parser->data;
+    lwlog_info("***MESSAGE COMPLETE***");
+
+    http_request_t *http_request = parser->data;
+    #if 0
     /* now print the ordered http http_request to console */
     printf("url: %s\n", http_request->url);
     printf("method: %s\n", http_request->method);
     for (int i = 0; i < 5; i++) {
-        http_header_t* header = &http_request->headers[i];
+        http_header_t *header = &http_request->headers[i];
         if (header->field)
             printf("Header: %s: %s\n", header->field, header->value);
     }
     printf("body: %s\n", http_request->body);
     printf("\r\n");
+    #endif
+
+    //http_request->req.data = NULL;
 
     if (0 == strcmp(http_request->url, "/")) {
         lwlog_info("root");
         char *file_contents;
         long input_file_size;
+
+#if 0
+        resp_buf.base = malloc(input_file_size + sizeof(http_header) + 1);
+
+        sprintf(resp_buf.base, http_header, file_contents);
+        /* set the http response to the buffer */
+        //resp_buf.base = file_contents;
+        resp_buf.len = input_file_size + sizeof(http_header);
+
+
+        resp_buf.base = malloc(input_file_size + sizeof(HTTP_HEADER) + 1);
+        sprintf(resp_buf.base, "%s", HTTP_HEADER file_contents);
+        resp_buf.len = input_file_size + sizeof(HTTP_HEADER) + 1;
+
+        free(file_contents);
+        http_request->req.data = resp_buf.base;
+#endif
+
+        // send http response header
+        http_request->resp_buf[0].base = HTTP_HEADER;
+        http_request->resp_buf[0].len = sizeof(HTTP_HEADER);
+
+        // send http response body
         FILE *input_file = fopen(INDEX_HTML, "rb");
         fseek(input_file, 0, SEEK_END);
         input_file_size = ftell(input_file);
         rewind(input_file);
         file_contents = malloc(input_file_size * (sizeof(char)));
-        fread(file_contents, sizeof(char), input_file_size, input_file);
+        fread(file_contents, sizeof(char), (size_t)input_file_size, input_file);
         fclose(input_file);
 
         lwlog_info("input_file_size: %ld", input_file_size);
 
-        resp_buf.base = malloc((input_file_size + sizeof(http_header) + 10) * sizeof(char));
-
-        sprintf(resp_buf.base, http_header, input_file_size, file_contents);
-        /* set the http response to the buffer */
-        //resp_buf.base = file_contents;
-        resp_buf.len = input_file_size + sizeof(http_header) + 10;
-
-        free(file_contents);
+        http_request->resp_buf[1].base = file_contents;
+        http_request->resp_buf[1].len = (size_t)input_file_size;
 
         /* lets send our short http hello world response and close the socket */
-        uv_write(&http_request->req, &http_request->stream, &resp_buf, 1, tcp_write_cb);
+        //uv_write(&http_request->req, &http_request->stream, &resp_buf, 1, tcp_write_cb);
+        uv_write(&http_request->req, &http_request->stream, http_request->resp_buf, 2, on_buf_write);
     }
 
     if (0 == strcmp(http_request->url, "/getconf")) {
         lwlog_info("getconf");
-        resp_buf.base = GETCONF;
-        resp_buf.len = sizeof(GETCONF);
+        http_request->resp_buf[0].base = GETCONF;
+        http_request->resp_buf[0].len = sizeof(GETCONF);
         /* lets send our short http hello world response and close the socket */
-        uv_write(&http_request->req, &http_request->stream, &resp_buf, 1, tcp_write_cb);
+        uv_write(&http_request->req, &http_request->stream, http_request->resp_buf, 1, on_nobuf_write);
     }
 
     if (0 == strcmp(http_request->url, "/setconf")) {
         lwlog_info("setconf");
+        http_request->resp_buf[0].base = RESPONSE_HEADER;
+        http_request->resp_buf[0].len = sizeof(RESPONSE_HEADER);
+        /* lets send our short http hello world response and close the socket */
+        uv_write(&http_request->req, &http_request->stream, http_request->resp_buf, 1, on_nobuf_write);
     }
 
     if (0 == strcmp(http_request->url, "/start")) {
         lwlog_info("start");
+        http_request->resp_buf[0].base = RESPONSE_HEADER;
+        http_request->resp_buf[0].len = sizeof(RESPONSE_HEADER);
+        /* lets send our short http hello world response and close the socket */
+        uv_write(&http_request->req, &http_request->stream, http_request->resp_buf, 1, on_nobuf_write);
     }
 
     if (0 == strcmp(http_request->url, "/stop")) {
         lwlog_info("stop");
+        http_request->resp_buf[0].base = RESPONSE_HEADER;
+        http_request->resp_buf[0].len = sizeof(RESPONSE_HEADER);
+        /* lets send our short http hello world response and close the socket */
+        uv_write(&http_request->req, &http_request->stream, http_request->resp_buf, 1, on_nobuf_write);
     }
+
+    // free http parser related malloc
+#if 0
+    free(http_request->url);
+    free(http_request->method);
+    free(http_request->body);
+    for (i = 0; i < http_request->header_lines; ++i) {
+        header = &http_request->headers[i];
+        free(header->field);
+        free(header->value);
+    }
+#endif
 
     return 0;
 }
@@ -291,14 +408,15 @@ void on_connect(uv_stream_t *server_handle, int status) {
     assert((uv_tcp_t *) server_handle == &server);
 
     /* initialize a new http http_request struct */
-    http_request_t* http_request = malloc(sizeof(http_request_t));
+    http_request_t *http_request = malloc(sizeof(http_request_t));
 
     /* create an extra tcp handle for the http_request */
-    uv_tcp_init(uv_loop, (uv_tcp_t*) &http_request->stream);
+    uv_tcp_init(uv_loop, (uv_tcp_t *) &http_request->stream);
 
     /* set references so we can use our http_request in http_parser and libuv */
     http_request->stream.data = http_request;
     http_request->parser.data = http_request;
+    http_request->req.data = http_request;
 
     /* accept the created http_request */
     ret = uv_accept(server_handle, &http_request->stream);
@@ -309,7 +427,7 @@ void on_connect(uv_stream_t *server_handle, int status) {
         uv_read_start(&http_request->stream, alloc_cb, on_read);
     } else {
         /* we seem to have an error and quit */
-        uv_close((uv_handle_t*) &http_request->stream, on_close);
+        uv_close((uv_handle_t *) &http_request->stream, on_close);
         //UV_CHECK(ret, "accept");
     }
 
@@ -342,8 +460,8 @@ int main(int argc, char *argv[]) {
     ret = uv_tcp_init(uv_loop, &server);
     UV_CHECK(ret, "tcp_init");
 
-    ret = uv_tcp_keepalive(&server, 1, 60);
-    UV_CHECK(ret, "tcp_keepalive");
+    //ret = uv_tcp_keepalive(&server, 1, 60);
+    //UV_CHECK(ret, "tcp_keepalive");
 
     ret = uv_ip4_addr("0.0.0.0", HTTP_PORT, &address);
     UV_CHECK(ret, "ip4_addr");
