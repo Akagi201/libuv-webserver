@@ -1,3 +1,9 @@
+/*
+ * @file webserver.c
+ * @author Akagi201
+ * @date 2015/01/03
+ */
+
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -72,7 +78,10 @@ void on_close(uv_handle_t *handle) {
 
     lwlog_info("connection closed");
 
-    free(http_request);
+    if (NULL != http_request) {
+        free(http_request);
+        http_request = NULL;
+    }
 
     return;
 }
@@ -104,7 +113,10 @@ void on_read(uv_stream_t *stream, ssize_t nread, const uv_buf_t *buf) {
         }
         uv_close((uv_handle_t *) &http_request->stream, on_close);
     }
-    free(buf->base);
+
+    if (NULL != buf->base) {
+        free(buf->base);
+    }
 
     return;
 }
